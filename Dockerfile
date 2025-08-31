@@ -1,5 +1,5 @@
-# Start with a Debian base image for Brave support
-FROM debian:buster
+# Start with a modern, supported Debian base image
+FROM debian:bookworm-slim
 
 # Prevent interactive prompts during installation
 ENV DEBIAN_FRONTEND=noninteractive
