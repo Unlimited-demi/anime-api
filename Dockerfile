@@ -4,13 +4,14 @@ FROM debian:bookworm-slim
 # Prevent interactive prompts during installation
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install dependencies, now including ca-certificates
+# Install dependencies, now including ca-certificates and xauth
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     sudo \
     curl \
     gnupg \
     xvfb \
+    xauth \
     --no-install-recommends && \
     rm -rf /var/lib/apt/lists/*
 
