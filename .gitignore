@@ -5,3 +5,4 @@ Tomodachi*
 client*
 proxy*
 downloader.go
+.env

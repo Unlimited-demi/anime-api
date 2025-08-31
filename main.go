@@ -72,9 +72,12 @@ func main() {
 	}
 
 	corsHandler := cors.Default().Handler(mux)
-
-	fmt.Println("✅ API server starting on http://localhost:8080")
-	if err := http.ListenAndServe(":8080", corsHandler); err != nil {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	fmt.Println("✅ API server starting on http://localhost:" + port)
+	if err := http.ListenAndServe(":"+port, corsHandler); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
 }
