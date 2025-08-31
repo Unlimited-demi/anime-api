@@ -35,6 +35,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/search", handler.SearchHandler)
 	mux.HandleFunc("/episodes", handler.EpisodesHandler)
+	mux.HandleFunc("/download-options", handler.DownloadOptionsHandler)
 	mux.HandleFunc("/download-link", handler.DownloadLinkHandler)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
