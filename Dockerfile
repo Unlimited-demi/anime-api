@@ -4,8 +4,9 @@ FROM debian:bookworm-slim
 # Prevent interactive prompts during installation
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install dependencies: sudo, curl, gnupg, and Xvfb (for the virtual display)
+# Install dependencies, now including ca-certificates
 RUN apt-get update && apt-get install -y \
+    ca-certificates \
     sudo \
     curl \
     gnupg \
