@@ -37,6 +37,7 @@ func main() {
 	mux.HandleFunc("/episodes", handler.EpisodesHandler)
 	mux.HandleFunc("/download-options", handler.DownloadOptionsHandler)
 	mux.HandleFunc("/download-link", handler.DownloadLinkHandler)
+	mux.HandleFunc("/image-proxy", handler.ImageProxyHandler)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)

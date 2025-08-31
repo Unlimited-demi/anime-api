@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -304,4 +305,38 @@ func (h *Handler) resolveDownloadLink(pahewinURL string) (string, error) {
 	case <-time.After(15 * time.Second):
 		return "", fmt.Errorf("timed out waiting for the final mp4 link")
 	}
+}
+
+// Add this to handlers.go
+
+func (h *Handler) ImageProxyHandler(w http.ResponseWriter, r *http.Request) {
+	imageURL := r.URL.Query().Get("url")
+	if imageURL == "" {
+		http.Error(w, "Missing image URL parameter 'url'", http.StatusBadRequest)
+		return
+	}
+
+	// Create a new request to the image server
+	req, err := http.NewRequest("GET", imageURL, nil)
+	if err != nil {
+		http.Error(w, "Failed to create image request", http.StatusInternalServerError)
+		return
+	}
+
+	// Add the crucial Referer header
+	req.Header.Set("Referer", "https://animepahe.ru/")
+
+	// Execute the request
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		http.Error(w, "Failed to fetch image", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Copy the original image headers (like Content-Type) and the image data
+	// straight to the response for our frontend.
+	w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
+	w.Header().Set("Content-Length", resp.Header.Get("Content-Length"))
+	io.Copy(w, resp.Body)
 }
