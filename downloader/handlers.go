@@ -8,7 +8,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -19,10 +18,11 @@ import (
 	"github.com/chromedp/chromedp"
 )
 
-var bravePath = `C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe`
+var bravePath = "/usr/bin/brave-browser"
 
 type Handler struct {
 	BrowserContext context.Context
+	isBrowserReady chan bool
 }
 
 type Anime struct {
@@ -31,7 +31,6 @@ type Anime struct {
 	Poster   string `json:"poster"`
 	Type     string `json:"type"`
 	Episodes string `json:"episodes"`
-	Season   string `json:"season"`
 	Year     string `json:"year"`
 }
 
@@ -41,18 +40,51 @@ type Episode struct {
 	Duration  string `json:"duration"`
 	Snapshot  string `json:"snapshot"`
 	Audio     string `json:"audio"`
-	CreatedAt string `json:"created_at"`
 }
 
 type EpisodeAPIResponse struct {
-	Total      int       `json:"total"`
-	PerPage    int       `json:"per_page"`
-	CurrentPage int      `json:"current_page"`
-	LastPage   int       `json:"last_page"`
-	Data       []Episode `json:"data"`
+	LastPage int       `json:"last_page"`
+	Data     []Episode `json:"data"`
+}
+
+func NewHandler() *Handler {
+	return &Handler{
+		isBrowserReady: make(chan bool),
+	}
+}
+
+func (h *Handler) InitBrowser() {
+	log.Println("Starting browser initialization in background...")
+
+	tempDownloadDir, err := os.MkdirTemp("", "chromedp-profile-*")
+	if err != nil {
+		log.Fatalf("Failed to create temp dir: %v", err)
+	}
+
+	ctx, _, err := newBraveContext(tempDownloadDir)
+	if err != nil {
+		log.Fatalf("Failed to create Brave context: %v", err)
+	}
+	h.BrowserContext = ctx
+
+	log.Println("Navigating to AnimePahe to initialize session...")
+	if err := chromedp.Run(h.BrowserContext, chromedp.Navigate("https://animepahe.ru/")); err != nil {
+		log.Fatalf("Failed to navigate to animepahe: %v", err)
+	}
+	
+	if err := chromedp.Run(h.BrowserContext, chromedp.ActionFunc(func(ctx context.Context) error {
+		return page.SetInterceptFileChooserDialog(true).Do(ctx)
+	})); err != nil {
+		log.Printf("Warning: could not set file chooser interception: %v", err)
+	}
+
+	log.Println("✅ Browser is ready and session is initialized.")
+	close(h.isBrowserReady)
 }
 
 func (h *Handler) SearchHandler(w http.ResponseWriter, r *http.Request) {
+	<-h.isBrowserReady
+
 	query := r.URL.Query().Get("q")
 	if query == "" {
 		http.Error(w, `Missing search query parameter "q"`, http.StatusBadRequest)
@@ -70,6 +102,7 @@ func (h *Handler) SearchHandler(w http.ResponseWriter, r *http.Request) {
 	)
 	if err != nil {
 		http.Error(w, "Failed to perform search", http.StatusInternalServerError)
+		log.Printf("SearchHandler error: %v", err)
 		return
 	}
 
@@ -80,8 +113,7 @@ func (h *Handler) SearchHandler(w http.ResponseWriter, r *http.Request) {
 		parts := strings.Split(href, "/")
 		statusText := s.Find("div.result-status").Text()
 		statusParts := strings.Split(statusText, " - ")
-		animeType := ""
-		episodes := ""
+		animeType, episodes := "", ""
 		if len(statusParts) > 0 {
 			animeType = statusParts[0]
 		}
@@ -104,6 +136,8 @@ func (h *Handler) SearchHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) EpisodesHandler(w http.ResponseWriter, r *http.Request) {
+	<-h.isBrowserReady
+
 	session := r.URL.Query().Get("session")
 	if session == "" {
 		http.Error(w, `Missing anime session ID parameter "session"`, http.StatusBadRequest)
@@ -112,8 +146,7 @@ func (h *Handler) EpisodesHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("API: Received episode list request for session '%s'", session)
 
 	allEpisodes := []Episode{}
-	currentPage := 1
-	lastPage := 1
+	currentPage, lastPage := 1, 1
 
 	for currentPage <= lastPage {
 		apiURL := fmt.Sprintf("https://animepahe.ru/api?m=release&id=%s&sort=episode_asc&page=%d", session, currentPage)
@@ -143,6 +176,8 @@ func (h *Handler) EpisodesHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) DownloadOptionsHandler(w http.ResponseWriter, r *http.Request) {
+	<-h.isBrowserReady
+
 	animeSession := r.URL.Query().Get("anime_session")
 	episodeSession := r.URL.Query().Get("episode_session")
 	if animeSession == "" || episodeSession == "" {
@@ -153,17 +188,31 @@ func (h *Handler) DownloadOptionsHandler(w http.ResponseWriter, r *http.Request)
 
 	playerPageURL := fmt.Sprintf("https://animepahe.ru/play/%s/%s", animeSession, episodeSession)
 
-	downloadOptions, err := h.getDownloadOptions(playerPageURL)
+	var downloadHTML string
+	err := chromedp.Run(h.BrowserContext,
+		chromedp.Navigate(playerPageURL),
+		chromedp.Click(`#downloadMenu`, chromedp.ByID),
+		chromedp.WaitVisible(`#pickDownload a`, chromedp.ByID),
+		chromedp.OuterHTML(`#pickDownload`, &downloadHTML, chromedp.ByID),
+	)
 	if err != nil {
 		http.Error(w, "Failed to get download options: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
+	doc, _ := goquery.NewDocumentFromReader(strings.NewReader(downloadHTML))
+	options := make(map[string]string)
+	doc.Find("a").Each(func(i int, s *goquery.Selection) {
+		options[strings.TrimSpace(s.Text())] = s.AttrOr("href", "")
+	})
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(downloadOptions)
+	json.NewEncoder(w).Encode(options)
 }
 
 func (h *Handler) DownloadLinkHandler(w http.ResponseWriter, r *http.Request) {
+	<-h.isBrowserReady
+
 	pahewinURL := r.URL.Query().Get("pahewin_url")
 	if pahewinURL == "" {
 		http.Error(w, `Missing "pahewin_url" parameter`, http.StatusBadRequest)
@@ -171,7 +220,7 @@ func (h *Handler) DownloadLinkHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("API: Received download link request for %s", pahewinURL)
 
-	finalLink, err := h.resolveDownloadLink(pahewinURL)
+	finalLink, err := resolveDownloadLink(h.BrowserContext, pahewinURL)
 	if err != nil {
 		http.Error(w, "Failed to resolve final download link: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -181,47 +230,35 @@ func (h *Handler) DownloadLinkHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"url": finalLink})
 }
 
-func (h *Handler) InitSession() {
-	if err := chromedp.Run(h.BrowserContext,
-		chromedp.Navigate("https://animepahe.ru/"),
-	); err != nil {
-		log.Fatalf("Failed to navigate to animepahe: %v", err)
+func (h *Handler) ImageProxyHandler(w http.ResponseWriter, r *http.Request) {
+	imageURL := r.URL.Query().Get("url")
+	if imageURL == "" {
+		http.Error(w, "Missing image URL parameter 'url'", http.StatusBadRequest)
+		return
 	}
-	if err := chromedp.Run(h.BrowserContext, chromedp.ActionFunc(func(ctx context.Context) error {
-		return page.SetInterceptFileChooserDialog(true).Do(ctx)
-	})); err != nil {
-		log.Printf("Warning: could not set file chooser interception: %v", err)
+
+	req, err := http.NewRequest("GET", imageURL, nil)
+	if err != nil {
+		http.Error(w, "Failed to create image request", http.StatusInternalServerError)
+		return
 	}
-	log.Println("Browser session initialized.")
+	req.Header.Set("Referer", "https://animepahe.ru/")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		http.Error(w, "Failed to fetch image", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
+	w.Header().Set("Content-Length", resp.Header.Get("Content-Length"))
+	io.Copy(w, resp.Body)
 }
 
-func NewBraveContext(tempDownloadDir string) (context.Context, context.CancelFunc, error) {
+func newBraveContext(tempDownloadDir string) (context.Context, context.CancelFunc, error) {
 	if _, err := os.Stat(bravePath); os.IsNotExist(err) {
 		return nil, nil, fmt.Errorf("brave browser not found at %s", bravePath)
-	}
-
-	prefs := map[string]interface{}{
-		"download": map[string]interface{}{
-			"prompt_for_download": false,
-			"default_directory":   tempDownloadDir,
-		},
-	}
-	prefsJSON, err := json.Marshal(prefs)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	tempProfileDir, err := os.MkdirTemp("", "chromedp-profile-*")
-	if err != nil {
-		return nil, nil, err
-	}
-	if err := os.MkdirAll(filepath.Join(tempProfileDir, "Default"), 0755); err != nil {
-		os.RemoveAll(tempProfileDir)
-		return nil, nil, err
-	}
-	if err := os.WriteFile(filepath.Join(tempProfileDir, "Default", "Preferences"), prefsJSON, 0644); err != nil {
-		os.RemoveAll(tempProfileDir)
-		return nil, nil, err
 	}
 
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
@@ -229,7 +266,6 @@ func NewBraveContext(tempDownloadDir string) (context.Context, context.CancelFun
 		chromedp.NoFirstRun,
 		chromedp.NoDefaultBrowserCheck,
 		chromedp.ExecPath(bravePath),
-		chromedp.UserDataDir(tempProfileDir),
 	)
 
 	allocCtx, cancel1 := chromedp.NewExecAllocator(context.Background(), opts...)
@@ -238,33 +274,13 @@ func NewBraveContext(tempDownloadDir string) (context.Context, context.CancelFun
 	return ctx, func() {
 		cancel2()
 		cancel1()
-		os.RemoveAll(tempProfileDir)
 	}, nil
 }
 
-func (h *Handler) getDownloadOptions(playerURL string) (map[string]string, error) {
-	var downloadHTML string
-	err := chromedp.Run(h.BrowserContext,
-		chromedp.Navigate(playerURL),
-		chromedp.Click(`#downloadMenu`, chromedp.ByID),
-		chromedp.WaitVisible(`#pickDownload a`, chromedp.ByID),
-		chromedp.OuterHTML(`#pickDownload`, &downloadHTML, chromedp.ByID),
-	)
-	if err != nil {
-		return nil, err
-	}
-	doc, _ := goquery.NewDocumentFromReader(strings.NewReader(downloadHTML))
-	options := make(map[string]string)
-	doc.Find("a").Each(func(i int, s *goquery.Selection) {
-		options[strings.TrimSpace(s.Text())] = s.AttrOr("href", "")
-	})
-	return options, nil
-}
-
-func (h *Handler) resolveDownloadLink(pahewinURL string) (string, error) {
+func resolveDownloadLink(ctx context.Context, pahewinURL string) (string, error) {
 	var kwikPageHTML string
 	var kwikURL string
-	err := chromedp.Run(h.BrowserContext,
+	err := chromedp.Run(ctx,
 		chromedp.Navigate(pahewinURL),
 		chromedp.Sleep(6*time.Second),
 		chromedp.OuterHTML(`html`, &kwikPageHTML, chromedp.ByQuery),
@@ -272,14 +288,16 @@ func (h *Handler) resolveDownloadLink(pahewinURL string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+
 	re := regexp.MustCompile(`"([^"]+kwik\.si[^"]+)"`)
 	matches := re.FindStringSubmatch(kwikPageHTML)
 	if len(matches) < 2 {
 		return "", fmt.Errorf("could not find kwik.si link on pahe.win page")
 	}
 	kwikURL = matches[1]
+
 	urlChan := make(chan string, 1)
-	listenCtx, cancelListen := context.WithCancel(h.BrowserContext)
+	listenCtx, cancelListen := context.WithCancel(ctx)
 	defer cancelListen()
 	chromedp.ListenTarget(listenCtx, func(ev interface{}) {
 		if req, ok := ev.(*network.EventRequestWillBeSent); ok {
@@ -292,51 +310,19 @@ func (h *Handler) resolveDownloadLink(pahewinURL string) (string, error) {
 			}
 		}
 	})
-	err = chromedp.Run(h.BrowserContext,
+
+	err = chromedp.Run(ctx,
 		chromedp.Navigate(kwikURL),
 		chromedp.Evaluate(`document.querySelector('form').submit()`, nil),
 	)
 	if err != nil && !strings.Contains(err.Error(), "context canceled") {
 		return "", err
 	}
+
 	select {
 	case url := <-urlChan:
 		return url, nil
 	case <-time.After(15 * time.Second):
 		return "", fmt.Errorf("timed out waiting for the final mp4 link")
 	}
-}
-
-// Add this to handlers.go
-
-func (h *Handler) ImageProxyHandler(w http.ResponseWriter, r *http.Request) {
-	imageURL := r.URL.Query().Get("url")
-	if imageURL == "" {
-		http.Error(w, "Missing image URL parameter 'url'", http.StatusBadRequest)
-		return
-	}
-
-	// Create a new request to the image server
-	req, err := http.NewRequest("GET", imageURL, nil)
-	if err != nil {
-		http.Error(w, "Failed to create image request", http.StatusInternalServerError)
-		return
-	}
-
-	// Add the crucial Referer header
-	req.Header.Set("Referer", "https://animepahe.ru/")
-
-	// Execute the request
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		http.Error(w, "Failed to fetch image", http.StatusBadGateway)
-		return
-	}
-	defer resp.Body.Close()
-
-	// Copy the original image headers (like Content-Type) and the image data
-	// straight to the response for our frontend.
-	w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
-	w.Header().Set("Content-Length", resp.Header.Get("Content-Length"))
-	io.Copy(w, resp.Body)
 }
