@@ -1,83 +1,77 @@
 package main
 
 import (
-	"anime-api/downloader"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"time"
 
-	"github.com/rs/cors"
+	"anime-api/downloader"
 )
 
 func main() {
-	tempDownloadDir, err := os.MkdirTemp("", "chromedp-profile-*")
-	if err != nil {
-		log.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tempDownloadDir)
-
-	ctx, cancel, err := downloader.NewBraveContext(tempDownloadDir)
-	if err != nil {
-		log.Fatalf("Failed to create Brave context: %v", err)
-	}
-	defer cancel()
-
-	handler := &downloader.Handler{
-		BrowserContext: ctx,
-	}
-
-	fmt.Println("Initializing browser session...")
-	handler.InitSession()
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/search", handler.SearchHandler)
-	mux.HandleFunc("/episodes", handler.EpisodesHandler)
-	mux.HandleFunc("/download-options", handler.DownloadOptionsHandler)
-	mux.HandleFunc("/download-link", handler.DownloadLinkHandler)
-	mux.HandleFunc("/image-proxy", handler.ImageProxyHandler)
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-	})
-
-	if os.Getenv("RENDER") == "true" {
-		go func() {
-			time.Sleep(10 * time.Second)
-			serviceURL := os.Getenv("RENDER_EXTERNAL_URL")
-			if serviceURL == "" {
-				log.Println("Warning: RENDER_EXTERNAL_URL not set. Self-pinging disabled.")
-				return
-			}
-			healthCheckURL := serviceURL + "/health"
-
-			log.Println("Starting self-ping routine to keep service alive at:", healthCheckURL)
-			ticker := time.NewTicker(20 * time.Second)
-			defer ticker.Stop()
-
-			for range ticker.C {
-				log.Println("Pinging self...")
-				resp, err := http.Get(healthCheckURL)
-				if err != nil {
-					log.Printf("Self-ping failed: %v", err)
-					continue
-				}
-				resp.Body.Close()
-				log.Printf("Self-ping successful: Status %s", resp.Status)
-			}
-		}()
-	}
-
-	corsHandler := cors.Default().Handler(mux)
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
-	fmt.Println("✅ API server starting on http://localhost:" + port)
-	if err := http.ListenAndServe(":"+port, corsHandler); err != nil {
-		log.Fatalf("Failed to start server: %v", err)
-	}
+
+	h := &downloader.Handler{}
+
+	// register routes
+	http.HandleFunc("/search", h.SearchHandler)
+	http.HandleFunc("/episodes", h.EpisodesHandler)
+	http.HandleFunc("/download-options", h.DownloadOptionsHandler)
+	http.HandleFunc("/download-link", h.DownloadLinkHandler)
+	http.HandleFunc("/image-proxy", h.ImageProxyHandler)
+
+	// health endpoint defined inline
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		if h.BrowserContext == nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprint(w, "Browser not initialized")
+			return
+		}
+		fmt.Fprint(w, "OK")
+	})
+
+	// start server right away so Render detects the port
+	go func() {
+		log.Printf("🚀 Server listening on :%s", port)
+		if err := http.ListenAndServe(":"+port, nil); err != nil {
+			log.Fatalf("❌ Server failed: %v", err)
+		}
+	}()
+
+	// init browser in background
+	go func() {
+		log.Println("⏳ Initializing Brave/Chromium browser context...")
+		tempDir := os.TempDir()
+		ctx, _, err := downloader.NewBraveContext(tempDir)
+		if err != nil {
+			log.Printf("⚠️ Browser init failed: %v", err)
+			return
+		}
+		h.BrowserContext = ctx
+		h.InitSession()
+		log.Println("✅ Browser has been initialized and session is ready.")
+		// cancel() when shutting down
+	}()
+
+	// periodic self-ping to keep Render alive
+	go func() {
+		for {
+			time.Sleep(5 * time.Minute)
+			resp, err := http.Get("http://localhost:" + port + "/health")
+			if err != nil {
+				log.Printf("⚠️ Health ping failed: %v", err)
+				continue
+			}
+			_ = resp.Body.Close()
+			log.Println("💓 Health ping OK")
+		}
+	}()
+
+	// block forever
+	select {}
 }
