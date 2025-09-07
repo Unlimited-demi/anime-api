@@ -10,6 +10,24 @@ import (
 	"anime-api/downloader"
 )
 
+// corsMiddleware allows cross-origin requests from anywhere (or restrict to your frontend later)
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+
+
 func main() {
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -19,21 +37,20 @@ func main() {
 	h := &downloader.Handler{}
 
 	// register routes
-	http.HandleFunc("/search", h.SearchHandler)
-	http.HandleFunc("/episodes", h.EpisodesHandler)
-	http.HandleFunc("/download-options", h.DownloadOptionsHandler)
-	http.HandleFunc("/download-link", h.DownloadLinkHandler)
-	http.HandleFunc("/image-proxy", h.ImageProxyHandler)
-
-	// health endpoint defined inline
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	http.Handle("/search", corsMiddleware(http.HandlerFunc(h.SearchHandler)))
+	http.Handle("/episodes", corsMiddleware(http.HandlerFunc(h.EpisodesHandler)))
+	http.Handle("/download-options", corsMiddleware(http.HandlerFunc(h.DownloadOptionsHandler)))
+	http.Handle("/download-link", corsMiddleware(http.HandlerFunc(h.DownloadLinkHandler)))
+	http.Handle("/image-proxy", corsMiddleware(http.HandlerFunc(h.ImageProxyHandler)))
+	http.Handle("/health", corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if h.BrowserContext == nil {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			fmt.Fprint(w, "Browser not initialized")
 			return
 		}
 		fmt.Fprint(w, "OK")
-	})
+	})))
+
 
 	// init browser in background
 	go func() {
@@ -52,17 +69,18 @@ func main() {
 
 	// periodic self-ping to keep Render alive
 	go func() {
-		for {
-			time.Sleep(5 * time.Minute)
-			resp, err := http.Get("http://localhost:" + port + "/health")
-			if err != nil {
-				log.Printf("⚠️ Health ping failed: %v", err)
-				continue
-			}
-			_ = resp.Body.Close()
-			log.Println("💓 Health ping OK")
+	for {
+		time.Sleep(10 * time.Second)
+		resp, err := http.Get("https://anime-api-nb3u.onrender.com/health")
+		if err != nil {
+			log.Printf("⚠️ Health ping failed: %v", err)
+			continue
 		}
+		_ = resp.Body.Close()
+		log.Println("💓 Health ping OK")
+	}
 	}()
+
 
 	// run server in main goroutine (so Render detects it immediately)
 	log.Printf("🚀 Server listening on 0.0.0.0:%s", port)
