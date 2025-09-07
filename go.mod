@@ -8,6 +8,7 @@ require (
 	github.com/PuerkitoBio/goquery v1.8.0
 	github.com/chromedp/cdproto v0.0.0-20250803210736-d308e07a266d
 	github.com/chromedp/chromedp v0.14.1
+	github.com/google/uuid v1.6.0
 	github.com/rs/cors v1.11.1
 	github.com/schollz/progressbar/v3 v3.18.0
 )

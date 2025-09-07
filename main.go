@@ -13,9 +13,24 @@ import (
 )
 
 func main() {
-	handler := downloader.NewHandler()
+	tempDownloadDir, err := os.MkdirTemp("", "chromedp-profile-*")
+	if err != nil {
+		log.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDownloadDir)
 
-	go handler.InitBrowser()
+	ctx, cancel, err := downloader.NewBraveContext(tempDownloadDir)
+	if err != nil {
+		log.Fatalf("Failed to create Brave context: %v", err)
+	}
+	defer cancel()
+
+	handler := &downloader.Handler{
+		BrowserContext: ctx,
+	}
+
+	fmt.Println("Initializing browser session...")
+	handler.InitSession()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/search", handler.SearchHandler)
@@ -29,33 +44,38 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
 
-	go func() {
-		time.Sleep(30 * time.Second)
-		healthCheckURL := "https://anime-api-nb3u.onrender.com/health"
-
-		log.Println("Starting self-ping routine to keep service alive at:", healthCheckURL)
-		ticker := time.NewTicker(20 * time.Second)
-		defer ticker.Stop()
-
-		for range ticker.C {
-			log.Println("Pinging self...")
-			resp, err := http.Get(healthCheckURL)
-			if err != nil {
-				log.Printf("Self-ping failed: %v", err)
-				continue
+	if os.Getenv("RENDER") == "true" {
+		go func() {
+			time.Sleep(10 * time.Second)
+			serviceURL := os.Getenv("RENDER_EXTERNAL_URL")
+			if serviceURL == "" {
+				log.Println("Warning: RENDER_EXTERNAL_URL not set. Self-pinging disabled.")
+				return
 			}
-			resp.Body.Close()
-			log.Printf("Self-ping successful: Status %s", resp.Status)
-		}
-	}()
+			healthCheckURL := serviceURL + "/health"
+
+			log.Println("Starting self-ping routine to keep service alive at:", healthCheckURL)
+			ticker := time.NewTicker(20 * time.Second)
+			defer ticker.Stop()
+
+			for range ticker.C {
+				log.Println("Pinging self...")
+				resp, err := http.Get(healthCheckURL)
+				if err != nil {
+					log.Printf("Self-ping failed: %v", err)
+					continue
+				}
+				resp.Body.Close()
+				log.Printf("Self-ping successful: Status %s", resp.Status)
+			}
+		}()
+	}
 
 	corsHandler := cors.Default().Handler(mux)
-
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
-
 	fmt.Println("✅ API server starting on http://localhost:" + port)
 	if err := http.ListenAndServe(":"+port, corsHandler); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
