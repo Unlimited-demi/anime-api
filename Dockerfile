@@ -40,4 +40,4 @@ RUN go build -o /anime-api .
 EXPOSE 8080
 
 # xvfb-run creates a virtual screen for Brave to run inside the server.
-CMD ["xvfb-run", "--auto-servernum", "/anime-api", "--no-sandbox"]
+CMD ["xvfb-run", "--auto-servernum", "/anime-api"]

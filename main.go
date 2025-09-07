@@ -65,8 +65,8 @@ func main() {
 	}()
 
 	// run server in main goroutine (so Render detects it immediately)
-	log.Printf("🚀 Server listening on :%s", port)
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
+	log.Printf("🚀 Server listening on 0.0.0.0:%s", port)
+	if err := http.ListenAndServe("0.0.0.0:"+port, nil); err != nil {
 		log.Fatalf("❌ Server failed: %v", err)
 	}
 }
