@@ -35,14 +35,6 @@ func main() {
 		fmt.Fprint(w, "OK")
 	})
 
-	// start server right away so Render detects the port
-	go func() {
-		log.Printf("🚀 Server listening on :%s", port)
-		if err := http.ListenAndServe(":"+port, nil); err != nil {
-			log.Fatalf("❌ Server failed: %v", err)
-		}
-	}()
-
 	// init browser in background
 	go func() {
 		log.Println("⏳ Initializing Brave/Chromium browser context...")
@@ -72,6 +64,9 @@ func main() {
 		}
 	}()
 
-	// block forever
-	select {}
+	// run server in main goroutine (so Render detects it immediately)
+	log.Printf("🚀 Server listening on :%s", port)
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
+		log.Fatalf("❌ Server failed: %v", err)
+	}
 }
