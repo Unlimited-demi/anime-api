@@ -26,63 +26,54 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-
-
 func main() {
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
 
-	h := &downloader.Handler{}
+	// 🔥 initialize pool of Brave contexts
+	tempDir := os.TempDir()
+	number := 3 // <--- NEW NUMBER
+	pool, err := downloader.NewBrowserPool(number, tempDir) // 3 contexts (tune as needed)
+	if err != nil {
+		log.Fatalf("❌ Failed to initialize browser pool: %v", err)
+	}
+	log.Printf("✅ Browser pool initialized with %d contexts", number) // <--- NEW LOG
 
-	// register routes
+	h := &downloader.Handler{Pool: pool}
+
+	// register routes with CORS
 	http.Handle("/search", corsMiddleware(http.HandlerFunc(h.SearchHandler)))
 	http.Handle("/episodes", corsMiddleware(http.HandlerFunc(h.EpisodesHandler)))
 	http.Handle("/download-options", corsMiddleware(http.HandlerFunc(h.DownloadOptionsHandler)))
 	http.Handle("/download-link", corsMiddleware(http.HandlerFunc(h.DownloadLinkHandler)))
 	http.Handle("/image-proxy", corsMiddleware(http.HandlerFunc(h.ImageProxyHandler)))
 	http.Handle("/health", corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if h.BrowserContext == nil {
+		if h.Pool == nil {
 			w.WriteHeader(http.StatusServiceUnavailable)
-			fmt.Fprint(w, "Browser not initialized")
+			fmt.Fprint(w, "Browser pool not initialized")
 			return
 		}
 		fmt.Fprint(w, "OK")
 	})))
 
-
-	// init browser in background
-	go func() {
-		log.Println("⏳ Initializing Brave/Chromium browser context...")
-		tempDir := os.TempDir()
-		ctx, _, err := downloader.NewBraveContext(tempDir)
-		if err != nil {
-			log.Printf("⚠️ Browser init failed: %v", err)
-			return
-		}
-		h.BrowserContext = ctx
-		h.InitSession()
-		log.Println("✅ Browser has been initialized and session is ready.")
-		// cancel() when shutting down
-	}()
-
 	// periodic self-ping to keep Render alive
 	go func() {
-	for {
-		time.Sleep(10 * time.Second)
-		resp, err := http.Get("https://anime-api-nb3u.onrender.com/health")
-		if err != nil {
-			log.Printf("⚠️ Health ping failed: %v", err)
-			continue
+		selfURL := fmt.Sprintf("http://0.0.0.0:%s/health", port)
+		for {
+			time.Sleep(30 * time.Second)
+			resp, err := http.Get(selfURL)
+			if err != nil {
+				log.Printf("⚠️ Health ping failed: %v", err)
+				continue
+			}
+			_ = resp.Body.Close()
+			log.Println("💓 Health ping OK")
 		}
-		_ = resp.Body.Close()
-		log.Println("💓 Health ping OK")
-	}
 	}()
 
-
-	// run server in main goroutine (so Render detects it immediately)
+	// run server in main goroutine
 	log.Printf("🚀 Server listening on 0.0.0.0:%s", port)
 	if err := http.ListenAndServe("0.0.0.0:"+port, nil); err != nil {
 		log.Fatalf("❌ Server failed: %v", err)

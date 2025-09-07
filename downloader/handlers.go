@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
@@ -19,10 +20,14 @@ import (
 	"github.com/chromedp/chromedp"
 )
 
-// var bravePath = `C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe`
+// ---------------- Types ----------------
 
 type Handler struct {
-	BrowserContext context.Context
+	Pool *BrowserPool
+}
+
+type BrowserPool struct {
+	pool chan context.Context
 }
 
 type Anime struct {
@@ -45,12 +50,98 @@ type Episode struct {
 }
 
 type EpisodeAPIResponse struct {
-	Total      int       `json:"total"`
-	PerPage    int       `json:"per_page"`
-	CurrentPage int      `json:"current_page"`
-	LastPage   int       `json:"last_page"`
-	Data       []Episode `json:"data"`
+	Total       int       `json:"total"`
+	PerPage     int       `json:"per_page"`
+	CurrentPage int       `json:"current_page"`
+	LastPage    int       `json:"last_page"`
+	Data        []Episode `json:"data"`
 }
+
+// ---------------- Brave Init ----------------
+
+// findBravePath detects Brave binary depending on OS
+func findBravePath() string {
+	var possiblePaths []string
+
+	if runtime.GOOS == "windows" {
+		possiblePaths = []string{
+			`C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe`,
+			`C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe`,
+		}
+	} else {
+		possiblePaths = []string{
+			"/usr/bin/brave-browser",
+			"/usr/bin/brave",
+			"/opt/brave.com/brave/brave-browser",
+		}
+	}
+
+	for _, path := range possiblePaths {
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+	}
+
+	log.Fatal("❌ Brave browser not found in common paths")
+	return ""
+}
+
+// NewBraveContext creates a new Brave-powered chromedp context
+func NewBraveContext(tmpDir string) (context.Context, context.CancelFunc, error) {
+	bravePath := findBravePath()
+
+	opts := append(
+		chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.ExecPath(bravePath),
+		chromedp.Flag("headless", true),
+		chromedp.Flag("disable-gpu", true),
+		chromedp.Flag("no-sandbox", true),
+		chromedp.Flag("disable-dev-shm-usage", true),
+		chromedp.UserDataDir(filepath.Join(tmpDir, fmt.Sprintf("brave-profile-%d", time.Now().UnixNano()))),
+	)
+
+	allocCtx, _ := chromedp.NewExecAllocator(context.Background(), opts...)
+	ctx, cancel := chromedp.NewContext(allocCtx)
+
+	// Ensure the browser session is actually alive
+	if err := chromedp.Run(ctx, page.Enable()); err != nil {
+		cancel()
+		return nil, nil, fmt.Errorf("failed to start Brave context: %w", err)
+	}
+
+	log.Println("✅ Brave browser context initialized")
+	return ctx, cancel, nil
+}
+
+// ---------------- Pool ----------------
+
+func NewBrowserPool(size int, tmpDir string) (*BrowserPool, error) {
+	pool := make(chan context.Context, size)
+	for i := 0; i < size; i++ {
+		ctx, _, err := NewBraveContext(tmpDir)
+		if err != nil {
+			return nil, err
+		}
+		// warm session
+		if err := chromedp.Run(ctx, chromedp.Navigate("https://animepahe.ru/")); err != nil {
+			log.Printf("⚠️ Failed to warm context %d: %v", i, err)
+		} else {
+			log.Printf("🔥 Browser context %d warmed", i+1)
+		}
+		pool <- ctx
+	}
+	return &BrowserPool{pool: pool}, nil
+}
+
+func (bp *BrowserPool) Get() context.Context {
+	return <-bp.pool
+}
+
+func (bp *BrowserPool) Put(ctx context.Context) {
+	bp.pool <- ctx
+}
+
+// ---------------- Handlers ----------------
 
 func (h *Handler) SearchHandler(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query().Get("q")
@@ -60,8 +151,11 @@ func (h *Handler) SearchHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("API: Received search request for '%s'", query)
 
+	ctx := h.Pool.Get()
+	defer h.Pool.Put(ctx)
+
 	var resultsHTML string
-	err := chromedp.Run(h.BrowserContext,
+	err := chromedp.Run(ctx,
 		chromedp.Navigate("https://animepahe.ru/"),
 		chromedp.SendKeys(`input.input-search[name="q"]`, query),
 		chromedp.WaitVisible(`div.search-results-wrap a .result-title`),
@@ -111,6 +205,9 @@ func (h *Handler) EpisodesHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("API: Received episode list request for session '%s'", session)
 
+	ctx := h.Pool.Get()
+	defer h.Pool.Put(ctx)
+
 	allEpisodes := []Episode{}
 	currentPage := 1
 	lastPage := 1
@@ -118,7 +215,7 @@ func (h *Handler) EpisodesHandler(w http.ResponseWriter, r *http.Request) {
 	for currentPage <= lastPage {
 		apiURL := fmt.Sprintf("https://animepahe.ru/api?m=release&id=%s&sort=episode_asc&page=%d", session, currentPage)
 		var jsonResponse string
-		err := chromedp.Run(h.BrowserContext,
+		err := chromedp.Run(ctx,
 			chromedp.Navigate(apiURL),
 			chromedp.Text(`body`, &jsonResponse, chromedp.ByQuery),
 		)
@@ -151,9 +248,12 @@ func (h *Handler) DownloadOptionsHandler(w http.ResponseWriter, r *http.Request)
 	}
 	log.Printf("API: Received download options request for anime %s, episode %s", animeSession, episodeSession)
 
+	ctx := h.Pool.Get()
+	defer h.Pool.Put(ctx)
+
 	playerPageURL := fmt.Sprintf("https://animepahe.ru/play/%s/%s", animeSession, episodeSession)
 
-	downloadOptions, err := h.getDownloadOptions(playerPageURL)
+	downloadOptions, err := h.getDownloadOptions(ctx, playerPageURL)
 	if err != nil {
 		http.Error(w, "Failed to get download options: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -171,7 +271,10 @@ func (h *Handler) DownloadLinkHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("API: Received download link request for %s", pahewinURL)
 
-	finalLink, err := h.resolveDownloadLink(pahewinURL)
+	ctx := h.Pool.Get()
+	defer h.Pool.Put(ctx)
+
+	finalLink, err := h.resolveDownloadLink(ctx, pahewinURL)
 	if err != nil {
 		http.Error(w, "Failed to resolve final download link: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -181,94 +284,11 @@ func (h *Handler) DownloadLinkHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"url": finalLink})
 }
 
-func (h *Handler) InitSession() {
-	if err := chromedp.Run(h.BrowserContext,
-		chromedp.Navigate("https://animepahe.ru/"),
-	); err != nil {
-		log.Fatalf("Failed to navigate to animepahe: %v", err)
-	}
-	if err := chromedp.Run(h.BrowserContext, chromedp.ActionFunc(func(ctx context.Context) error {
-		return page.SetInterceptFileChooserDialog(true).Do(ctx)
-	})); err != nil {
-		log.Printf("Warning: could not set file chooser interception: %v", err)
-	}
-	log.Println("Browser session initialized.")
-}
+// ---------------- Internals ----------------
 
-func NewBraveContext(tempDownloadDir string) (context.Context, context.CancelFunc, error) {
-	// Possible Brave paths for Linux and Windows
-	possiblePaths := []string{
-		"/usr/bin/brave-browser",
-		"/usr/bin/brave",
-		"/snap/bin/brave",
-		"C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe",
-	}
-
-	var braveExec string
-	for _, p := range possiblePaths {
-		if _, err := os.Stat(p); err == nil {
-			braveExec = p
-			break
-		}
-	}
-
-	if braveExec == "" {
-		return nil, nil, fmt.Errorf("Brave browser not found in any known locations")
-	}
-
-	fmt.Printf("✅ Using Brave executable: %s\n", braveExec)
-
-	// Set download prefs
-	prefs := map[string]interface{}{
-		"download": map[string]interface{}{
-			"prompt_for_download": false,
-			"default_directory":   tempDownloadDir,
-		},
-	}
-	prefsJSON, err := json.Marshal(prefs)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	// Create a temporary profile dir
-	tempProfileDir, err := os.MkdirTemp("", "chromedp-profile-*")
-	if err != nil {
-		return nil, nil, err
-	}
-	if err := os.MkdirAll(filepath.Join(tempProfileDir, "Default"), 0755); err != nil {
-		os.RemoveAll(tempProfileDir)
-		return nil, nil, err
-	}
-	if err := os.WriteFile(filepath.Join(tempProfileDir, "Default", "Preferences"), prefsJSON, 0644); err != nil {
-		os.RemoveAll(tempProfileDir)
-		return nil, nil, err
-	}
-
-	// Exec options
-	opts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.Flag("headless", false), // you’re using xvfb, so this is fine
-		chromedp.NoFirstRun,
-		chromedp.NoDefaultBrowserCheck,
-		chromedp.ExecPath(braveExec),
-		chromedp.UserDataDir(tempProfileDir),
-		chromedp.Flag("no-sandbox", true),
-		chromedp.Flag("disable-dev-shm-usage", true),
-		chromedp.Flag("disable-gpu", true),
-	)
-
-	allocCtx, cancel1 := chromedp.NewExecAllocator(context.Background(), opts...)
-	ctx, cancel2 := chromedp.NewContext(allocCtx)
-
-	return ctx, func() {
-		cancel2()
-		cancel1()
-		os.RemoveAll(tempProfileDir)
-	}, nil
-}
-
-func (h *Handler) getDownloadOptions(playerURL string) (map[string]string, error) {
+func (h *Handler) getDownloadOptions(ctx context.Context, playerURL string) (map[string]string, error) {
 	var downloadHTML string
-	err := chromedp.Run(h.BrowserContext,
+	err := chromedp.Run(ctx,
 		chromedp.Navigate(playerURL),
 		chromedp.Click(`#downloadMenu`, chromedp.ByID),
 		chromedp.WaitVisible(`#pickDownload a`, chromedp.ByID),
@@ -285,10 +305,10 @@ func (h *Handler) getDownloadOptions(playerURL string) (map[string]string, error
 	return options, nil
 }
 
-func (h *Handler) resolveDownloadLink(pahewinURL string) (string, error) {
+func (h *Handler) resolveDownloadLink(ctx context.Context, pahewinURL string) (string, error) {
 	var kwikPageHTML string
 	var kwikURL string
-	err := chromedp.Run(h.BrowserContext,
+	err := chromedp.Run(ctx,
 		chromedp.Navigate(pahewinURL),
 		chromedp.Sleep(6*time.Second),
 		chromedp.OuterHTML(`html`, &kwikPageHTML, chromedp.ByQuery),
@@ -303,7 +323,7 @@ func (h *Handler) resolveDownloadLink(pahewinURL string) (string, error) {
 	}
 	kwikURL = matches[1]
 	urlChan := make(chan string, 1)
-	listenCtx, cancelListen := context.WithCancel(h.BrowserContext)
+	listenCtx, cancelListen := context.WithCancel(ctx)
 	defer cancelListen()
 	chromedp.ListenTarget(listenCtx, func(ev interface{}) {
 		if req, ok := ev.(*network.EventRequestWillBeSent); ok {
@@ -316,7 +336,7 @@ func (h *Handler) resolveDownloadLink(pahewinURL string) (string, error) {
 			}
 		}
 	})
-	err = chromedp.Run(h.BrowserContext,
+	err = chromedp.Run(ctx,
 		chromedp.Navigate(kwikURL),
 		chromedp.Evaluate(`document.querySelector('form').submit()`, nil),
 	)
@@ -331,7 +351,6 @@ func (h *Handler) resolveDownloadLink(pahewinURL string) (string, error) {
 	}
 }
 
-// Add this to handlers.go
 
 func (h *Handler) ImageProxyHandler(w http.ResponseWriter, r *http.Request) {
 	imageURL := r.URL.Query().Get("url")
@@ -340,17 +359,13 @@ func (h *Handler) ImageProxyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create a new request to the image server
 	req, err := http.NewRequest("GET", imageURL, nil)
 	if err != nil {
 		http.Error(w, "Failed to create image request", http.StatusInternalServerError)
 		return
 	}
-
-	// Add the crucial Referer header
 	req.Header.Set("Referer", "https://animepahe.ru/")
 
-	// Execute the request
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		http.Error(w, "Failed to fetch image", http.StatusBadGateway)
@@ -358,8 +373,6 @@ func (h *Handler) ImageProxyHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	// Copy the original image headers (like Content-Type) and the image data
-	// straight to the response for our frontend.
 	w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
 	w.Header().Set("Content-Length", resp.Header.Get("Content-Length"))
 	io.Copy(w, resp.Body)
