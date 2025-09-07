@@ -19,7 +19,7 @@ import (
 	"github.com/chromedp/chromedp"
 )
 
-var bravePath = `C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe`
+// var bravePath = `C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe`
 
 type Handler struct {
 	BrowserContext context.Context
@@ -196,10 +196,29 @@ func (h *Handler) InitSession() {
 }
 
 func NewBraveContext(tempDownloadDir string) (context.Context, context.CancelFunc, error) {
-	if _, err := os.Stat(bravePath); os.IsNotExist(err) {
-		return nil, nil, fmt.Errorf("brave browser not found at %s", bravePath)
+	// Possible Brave paths for Linux and Windows
+	possiblePaths := []string{
+		"/usr/bin/brave-browser",
+		"/usr/bin/brave",
+		"/snap/bin/brave",
+		"C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe",
 	}
 
+	var braveExec string
+	for _, p := range possiblePaths {
+		if _, err := os.Stat(p); err == nil {
+			braveExec = p
+			break
+		}
+	}
+
+	if braveExec == "" {
+		return nil, nil, fmt.Errorf("Brave browser not found in any known locations")
+	}
+
+	fmt.Printf("✅ Using Brave executable: %s\n", braveExec)
+
+	// Set download prefs
 	prefs := map[string]interface{}{
 		"download": map[string]interface{}{
 			"prompt_for_download": false,
@@ -211,6 +230,7 @@ func NewBraveContext(tempDownloadDir string) (context.Context, context.CancelFun
 		return nil, nil, err
 	}
 
+	// Create a temporary profile dir
 	tempProfileDir, err := os.MkdirTemp("", "chromedp-profile-*")
 	if err != nil {
 		return nil, nil, err
@@ -224,12 +244,16 @@ func NewBraveContext(tempDownloadDir string) (context.Context, context.CancelFun
 		return nil, nil, err
 	}
 
+	// Exec options
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.Flag("headless", false),
+		chromedp.Flag("headless", false), // you’re using xvfb, so this is fine
 		chromedp.NoFirstRun,
 		chromedp.NoDefaultBrowserCheck,
-		chromedp.ExecPath(bravePath),
+		chromedp.ExecPath(braveExec),
 		chromedp.UserDataDir(tempProfileDir),
+		chromedp.Flag("no-sandbox", true),
+		chromedp.Flag("disable-dev-shm-usage", true),
+		chromedp.Flag("disable-gpu", true),
 	)
 
 	allocCtx, cancel1 := chromedp.NewExecAllocator(context.Background(), opts...)
